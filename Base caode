@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kirrple Race</title>
+  <style>
+    html, body { height: 100%; margin: 0; background:#05060a; overflow:hidden; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #hud {
+      position: fixed; inset: 0 auto auto 0;
+      padding: 12px 14px; color: #cfe7ff; z-index: 10;
+      background: linear-gradient(180deg, rgba(0,0,0,.55), rgba(0,0,0,0));
+      user-select: none;
+      width: 420px; max-width: calc(100vw - 20px);
+    }
+    #hud h1 { margin: 0 0 6px 0; font-size: 18px; letter-spacing: .4px; }
+    #hud .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    #hud .pill {
+      display:inline-flex; gap:8px; align-items:center;
+      padding: 6px 10px; border: 1px solid rgba(120,190,255,.25);
+      border-radius: 999px; background: rgba(10,18,30,.45);
+      font-size: 12px;
+    }
+    #hud button {
+      cursor:pointer; border-radius: 10px; border: 1px solid rgba(120,190,255,.35);
+      background: rgba(25,60,110,.35); color:#e9f4ff;
+      padding: 8px 10px; font-weight: 600;
+    }
+    #hud button:hover { background: rgba(25,60,110,.55); }
+    #center {
+      position: fixed; inset: 0; display:flex; align-items:center; justify-content:center;
+      z-index: 9; pointer-events:none;
+    }
+    #panel {
+      pointer-events:auto;
+      width: min(560px, calc(100vw - 40px));
+      padding: 18px 18px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(120,190,255,.28);
+      background: rgba(8,12,20,.82);
+      color: #d7ecff;
+      box-shadow: 0 12px 60px rgba(0,0,0,.65);
+      display:none;
+    }
+    #panel h2 { margin:0 0 8px; font-size: 18px;}
+    #panel p { margin: 6px 0; color: rgba(215,236,255,.85); line-height: 1.35; }
+    #panel .small { font-size: 12px; opacity:.85; margin-top:10px; }
+    #panel .actions { display:flex; gap:10px; margin-top:12px; flex-wrap:wrap;}
+    #panel .actions button { pointer-events:auto; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <h1>🟣 Kirrple Race</h1>
+    <div class="row">
+      <span class="pill">Score: <b id="score">0</b></span>
+      <span class="pill">Speed: <b id="speed">1.00</b>x</span>
+      <span class="pill">Best: <b id="best">0</b></span>
+      <button id="btnStart">Start</button>
+      <button id="btnRestart">Restart</button>
+      <button id="btnMute">Sound: On</button>
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <span class="pill">Controls: <b>↑ ↓ ← →</b> (grid steering)</span>
+      <span class="pill">Don’t hit your <b>trail</b> or the <b>walls</b></span>
+    </div>
+  </div>
+
+  <div id="center">
+    <div id="panel">
+      <h2 id="panelTitle">Kirrple Race</h2>
+      <p id="panelBody">Press Start to begin.</p>
+      <div class="actions">
+        <button id="panelStart">Start</button>
+        <button id="panelRestart">Restart</button>
+      </div>
+      <p class="small">
+        Tip: Most browsers require a click to enable audio. If sound is silent, hit “Sound: On” after starting.
+      </p>
+    </div>
+  </div>
+
+  <!-- Three.js (CDN) -->
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+    // -----------------------------
+    // Config (tweak these for feel)
+    // -----------------------------
+    const GRID_SIZE = 46;            // arena width/height in "cells"
+    const CELL = 1.0;                // world units per cell
+    const TURN_BUFFER_MS = 90;       // prevents ultra-fast double turns
+    const BASE_STEP_MS = 95;         // movement tick (lower = faster)
+    const SPEED_RAMP_EVERY = 1200;   // ms between speed nudges
+    const SPEED_RAMP_FACTOR = 0.985; // multiplies step ms (smaller => faster)
+    const TRAIL_HEIGHT = 0.28;       // trail thickness height
+    const TRAIL_WIDTH = 0.26;        // trail thickness width
+    const TRAIL_GLOW = 0x9b5cff;     // kirrple
+    const FLOOR_COLOR = 0x070a12;
+    const WALL_COLOR = 0x0f1b2e;
+
+    // Collision: how many recent cells to ignore so you don't instantly collide with your own segment
+    const SELF_IGNORE_CELLS = 2;
+
+    // -----------------------------
+    // DOM
+    // -----------------------------
+    const scoreEl = document.getElementById("score");
+    const speedEl = document.getElementById("speed");
+    const bestEl  = document.getElementById("best");
+    const btnStart   = document.getElementById("btnStart");
+    const btnRestart = document.getElementById("btnRestart");
+    const btnMute    = document.getElementById("btnMute");
+    const panel      = document.getElementById("panel");
+    const panelTitle = document.getElementById("panelTitle");
+    const panelBody  = document.getElementById("panelBody");
+    const panelStart = document.getElementById("panelStart");
+    const panelRestart = document.getElementById("panelRestart");
+
+    const BEST_KEY = "kirrple_race_best";
+    let best = Number(localStorage.getItem(BEST_KEY) || 0);
+    bestEl.textContent = String(best);
+
+    // -----------------------------
+    // Three.js scene
+    // -----------------------------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.setClearColor(0x05060a, 1);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x05060a, 18, 70);
+
+    const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 220);
+    camera.position.set(0, 26, 26);
+    camera.lookAt(0, 0, 0);
+
+    // lighting
+    const hemi = new THREE.HemisphereLight(0xaad6ff, 0x0a0f1c, 0.85);
+    scene.add(hemi);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 0.65);
+    dir.position.set(12, 20, 10);
+    scene.add(dir);
+
+    // floor
+    const floorGeo = new THREE.PlaneGeometry(GRID_SIZE * CELL, GRID_SIZE * CELL);
+    const floorMat = new THREE.MeshStandardMaterial({ color: FLOOR_COLOR, roughness: 0.95, metalness: 0.05 });
+    const floor = new THREE.Mesh(floorGeo, floorMat);
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = -0.01;
+    scene.add(floor);
+
+    // subtle grid
+    const grid = new THREE.GridHelper(GRID_SIZE * CELL, GRID_SIZE, 0x223355, 0x0b1222);
+    grid.position.y = 0.0;
+    scene.add(grid);
+
+    // walls (visual only; collision uses bounds)
+    const wallH = 2.2;
+    const wallT = 0.35;
+    const arenaW = GRID_SIZE * CELL;
+    const wallMat = new THREE.MeshStandardMaterial({ color: WALL_COLOR, roughness: 0.8, metalness: 0.1, emissive: 0x040812 });
+
+    function makeWall(w, h, d, x, y, z) {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+      m.position.set(x, y, z);
+      scene.add(m);
+      return m;
+    }
+    // North/South
+    makeWall(arenaW + wallT*2, wallH, wallT, 0, wallH/2,  arenaW/2 + wallT/2);
+    makeWall(arenaW + wallT*2, wallH, wallT, 0, wallH/2, -arenaW/2 - wallT/2);
+    // East/West
+    makeWall(wallT, wallH, arenaW,  arenaW/2 + wallT/2, wallH/2, 0);
+    makeWall(wallT, wallH, arenaW, -arenaW/2 - wallT/2, wallH/2, 0);
+
+    // Neon posts (for vibe)
+    const postMat = new THREE.MeshStandardMaterial({ color: 0x0b1730, emissive: 0x173a7a, emissiveIntensity: 0.6, roughness: 0.7, metalness: 0.2 });
+    const postGeo = new THREE.CylinderGeometry(0.12, 0.12, 2.6, 10);
+    for (let i=0;i<10;i++){
+      const p = new THREE.Mesh(postGeo, postMat);
+      const t = i/10 * Math.PI*2;
+      p.position.set(Math.cos(t)* (arenaW*0.42), 1.3, Math.sin(t)* (arenaW*0.42));
+      scene.add(p);
+    }
+
+    // -----------------------------
+    // Player (simple 3D wheelchair + rider)
+    // -----------------------------
+    const player = new THREE.Group();
+
+    // wheels
+    const wheelGeo = new THREE.TorusGeometry(0.55, 0.09, 10, 18);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x0e1016, roughness: 0.75, metalness: 0.2 });
+    const leftWheel  = new THREE.Mesh(wheelGeo, wheelMat);
+    const rightWheel = new THREE.Mesh(wheelGeo, wheelMat);
+    leftWheel.rotation.y = Math.PI/2;
+    rightWheel.rotation.y = Math.PI/2;
+    leftWheel.position.set(-0.45, 0.55, 0);
+    rightWheel.position.set(0.45, 0.55, 0);
+    player.add(leftWheel, rightWheel);
+
+    // chair frame
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0x1c2433, roughness: 0.55, metalness: 0.35, emissive: 0x0a1022 });
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.35, 0.75), frameMat);
+    seat.position.set(0, 0.95, 0);
+    player.add(seat);
+
+    const back = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.55, 0.18), frameMat);
+    back.position.set(0, 1.22, -0.28);
+    player.add(back);
+
+    // glow core
+    const glowMat = new THREE.MeshStandardMaterial({ color: 0x221133, emissive: TRAIL_GLOW, emissiveIntensity: 1.4, roughness: 0.35, metalness: 0.2 });
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.22, 14, 14), glowMat);
+    core.position.set(0, 1.05, 0.25);
+    player.add(core);
+
+    // rider head/torso
+    const riderMat = new THREE.MeshStandardMaterial({ color: 0x0f1420, roughness: 0.85, metalness: 0.05, emissive: 0x050812 });
+    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.20, 0.38, 6, 12), riderMat);
+    torso.position.set(0, 1.45, 0.05);
+    player.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 14), riderMat);
+    head.position.set(0, 1.75, 0.05);
+    player.add(head);
+
+    player.position.set(0, 0, 0);
+    scene.add(player);
+
+    // -----------------------------
+    // Trail rendering: instanced "segments"
+    // -----------------------------
+    const trailGroup = new THREE.Group();
+    scene.add(trailGroup);
+
+    const segMat = new THREE.MeshStandardMaterial({
+      color: 0x2b1a40,
+      emissive: TRAIL_GLOW,
+      emissiveIntensity: 1.25,
+      roughness: 0.35,
+      metalness: 0.12,
+      transparent: true,
+      opacity: 0.95
+    });
+
+    function makeSegmentMesh(length, horizontal=true) {
+      // segment aligned along X (horizontal) or Z (vertical)
+      const w = horizontal ? length : TRAIL_WIDTH;
+      const d = horizontal ? TRAIL_WIDTH : length;
+      const geo = new THREE.BoxGeometry(w, TRAIL_HEIGHT, d);
+      const mesh = new THREE.Mesh(geo, segMat);
+      mesh.position.y = TRAIL_HEIGHT/2;
+      return mesh;
+    }
+
+    // -----------------------------
+    // Game state
+    // -----------------------------
+    const DIRS = {
+      U: { dx: 0, dz: -1, yaw: Math.PI },
+      D: { dx: 0, dz:  1, yaw: 0 },
+      L: { dx:-1, dz:  0, yaw: -Math.PI/2 },
+      R: { dx: 1, dz:  0, yaw: Math.PI/2 },
+    };
+
+    let running = false;
+    let gameOver = false;
+
+    // grid position (integers)
+    let gx=0, gz=0;
+    let dirKey = "R";
+    let pendingDir = null;
+    let lastTurnAt = 0;
+
+    // trail occupancy
+    // Use a Set of "x,z" keys to detect collisions.
+    const occupied = new Set();
+    let visitedCells = []; // in order, to allow ignoring last few cells
+
+    // score/speed
+    let score = 0;
+    let stepMs = BASE_STEP_MS;
+    let lastStepAt = 0;
+    let lastRampAt = 0;
+
+    // current straight segment building
+    let segStart = null; // {x,z}
+    let segDir = null;   // "U/D/L/R"
+    let lastCell = null;
+
+    function keyOf(x,z){ return `${x},${z}`; }
+
+    function inBounds(x,z){
+      const half = Math.floor(GRID_SIZE/2);
+      return x >= -half && x <= half && z >= -half && z <= half;
+    }
+
+    function resetGame() {
+      // clear visuals
+      while (trailGroup.children.length) trailGroup.remove(trailGroup.children[0]);
+
+      running = false;
+      gameOver = false;
+
+      gx = 0; gz = 0;
+      dirKey = "R";
+      pendingDir = null;
+      lastTurnAt = 0;
+
+      occupied.clear();
+      visitedCells = [];
+
+      score = 0;
+      stepMs = BASE_STEP_MS;
+      lastStepAt = performance.now();
+      lastRampAt = performance.now();
+      updateHud();
+
+      // initial placement
+      player.position.set(gx*CELL, 0, gz*CELL);
+      player.rotation.y = DIRS[dirKey].yaw;
+
+      // start trail from the first cell
+      segStart = { x: gx, z: gz };
+      segDir = dirKey;
+      lastCell = { x: gx, z: gz };
+
+      // mark starting cell as occupied
+      occupied.add(keyOf(gx,gz));
+      visitedCells.push({x:gx,z:gz});
+
+      showPanel(true, "Kirrple Race", "Press Start. Arrow keys steer. Don’t hit your trail or the walls.");
+    }
+
+    function updateHud() {
+      scoreEl.textContent = String(score);
+      speedEl.textContent = (BASE_STEP_MS / stepMs).toFixed(2);
+      bestEl.textContent = String(best);
+    }
+
+    // finalize a segment from segStart -> lastCell
+    function finalizeSegment() {
+      if (!segStart || !lastCell || !segDir) return;
+
+      const dx = Math.abs(lastCell.x - segStart.x);
+      const dz = Math.abs(lastCell.z - segStart.z);
+      const lengthCells = dx + dz; // straight line
+      if (lengthCells <= 0) return;
+
+      const lengthWorld = (lengthCells + 1) * CELL; // include both ends
+      const horizontal = (segDir === "L" || segDir === "R");
+
+      const seg = makeSegmentMesh(lengthWorld, horizontal);
+
+      // center position between start and end
+      const cx = (segStart.x + lastCell.x) / 2 * CELL;
+      const cz = (segStart.z + lastCell.z) / 2 * CELL;
+      seg.position.set(cx, TRAIL_HEIGHT/2, cz);
+
+      trailGroup.add(seg);
+    }
+
+    function commitTurn(newDir) {
+      // finalize current segment up to the current cell
+      finalizeSegment();
+
+      // new segment starts at current cell
+      segStart = { x: gx, z: gz };
+      segDir = newDir;
+    }
+
+    function die(reason) {
+      gameOver = true;
+      running = false;
+
+      // finalize last segment so it renders cleanly
+      finalizeSegment();
+
+      if (score > best) {
+        best = score;
+        localStorage.setItem(BEST_KEY, String(best));
+      }
+      updateHud();
+      playSfx("crash");
+
+      showPanel(true, "💥 Game Over", `${reason}\nScore: ${score}  •  Best: ${best}`);
+    }
+
+    // -----------------------------
+    // Input
+    // -----------------------------
+    function opposite(a,b){
+      return (a==="U"&&b==="D")||(a==="D"&&b==="U")||(a==="L"&&b==="R")||(a==="R"&&b==="L");
+    }
+
+    window.addEventListener("keydown", (e) => {
+      const now = performance.now();
+      let want = null;
+
+      if (e.key === "ArrowUp") want = "U";
+      else if (e.key === "ArrowDown") want = "D";
+      else if (e.key === "ArrowLeft") want = "L";
+      else if (e.key === "ArrowRight") want = "R";
+      else if (e.key === " " || e.key === "Enter") {
+        if (!running && !gameOver) startGame();
+        else if (gameOver) { resetGame(); startGame(); }
+        return;
+      } else return;
+
+      e.preventDefault();
+
+      if (!running) return;
+
+      // don't allow opposite direction (instant backtrack)
+      if (opposite(dirKey, want)) return;
+
+      // throttle rapid turns
+      if (now - lastTurnAt < TURN_BUFFER_MS) return;
+
+      pendingDir = want;
+      lastTurnAt = now;
+
+      playSfx("turn");
+    }, { passive:false });
+
+    // -----------------------------
+    // Audio: simple chiptune + sfx
+    // -----------------------------
+    let audioOn = true;
+    let audioCtx = null;
+    let master = null;
+
+    function ensureAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+      master = audioCtx.createGain();
+      master.gain.value = 0.55;
+      master.connect(audioCtx.destination);
+
+      // start music loop
+      startMusic();
+    }
+
+    function setMute(muted) {
+      audioOn = !muted;
+      btnMute.textContent = `Sound: ${audioOn ? "On" : "Off"}`;
+      if (master) master.gain.value = audioOn ? 0.55 : 0.0;
+    }
+
+    btnMute.addEventListener("click", () => {
+      ensureAudio();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      setMute(audioOn); // toggle
+    });
+
+    // Quick & dirty note helper
+    const A4 = 440;
+    function noteFreq(semiFromA4){
+      return A4 * Math.pow(2, semiFromA4 / 12);
+    }
+
+    // 16-bit-ish melody: square lead + triangle bass
+    let musicTimer = null;
+    function startMusic(){
+      if (!audioCtx) return;
+      if (musicTimer) return;
+
+      // tempo-ish
+      const step = 0.14; // seconds per note
+      let t = audioCtx.currentTime + 0.06;
+      let i = 0;
+
+      // “cheep cheep cheep” motif — intentionally simple
+      // semitone offsets from A4 (440). 0 = A4, 3 = C5-ish, etc.
+      const lead = [ 7, 7, 7, 3, 7, 10, 7, 3,  7, 7, 7, 3, 7, 12, 10, 7 ];
+      const bass = [ -12, -12, -12, -12, -10, -10, -10, -10,  -12, -12, -12, -12, -15, -15, -15, -15 ];
+
+      musicTimer = setInterval(() => {
+        if (!audioOn || !audioCtx) return;
+
+        const lf = noteFreq(lead[i % lead.length]);
+        const bf = noteFreq(bass[i % bass.length]);
+
+        // lead
+        blip(lf, t, step * 0.92, "square", 0.09);
+        // bass
+        blip(bf, t, step * 0.92, "triangle", 0.07);
+
+        // tiny noise “hat”
+        hat(t, 0.03, 0.02);
+
+        t += step;
+        i++;
+      }, step * 1000);
+    }
+
+    function blip(freq, startTime, dur, type, gainVal){
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, startTime);
+
+      g.gain.setValueAtTime(0.0001, startTime);
+      g.gain.exponentialRampToValueAtTime(gainVal, startTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, startTime + dur);
+
+      o.connect(g); g.connect(master);
+      o.start(startTime);
+      o.stop(startTime + dur + 0.02);
+    }
+
+    function hat(startTime, dur, gainVal){
+      // noise burst via buffer
+      const bufferSize = Math.floor(audioCtx.sampleRate * dur);
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1) * (1 - i/bufferSize);
+
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(gainVal, startTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, startTime + dur);
+
+      src.connect(g); g.connect(master);
+      src.start(startTime);
+      src.stop(startTime + dur + 0.02);
+    }
+
+    function playSfx(kind){
+      if (!audioOn) return;
+      ensureAudio();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+
+      const t = audioCtx.currentTime + 0.01;
+
+      if (kind === "turn") {
+        blip(noteFreq(14), t, 0.06, "square", 0.06);
+      } else if (kind === "crash") {
+        // descending square + noise
+        blip(noteFreq(7), t, 0.08, "square", 0.10);
+        blip(noteFreq(0), t+0.05, 0.10, "square", 0.08);
+        hat(t, 0.18, 0.06);
+      } else if (kind === "start") {
+        blip(noteFreq(12), t, 0.07, "square", 0.08);
+        blip(noteFreq(19), t+0.06, 0.09, "square", 0.07);
+      }
+    }
+
+    // -----------------------------
+    // UI / start/stop
+    // -----------------------------
+    function showPanel(show, title, body) {
+      panel.style.display = show ? "block" : "none";
+      if (title) panelTitle.textContent = title;
+      if (body) panelBody.textContent = body;
+    }
+
+    function startGame() {
+      if (running) return;
+      ensureAudio();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+
+      showPanel(false);
+      running = true;
+      gameOver = false;
+      lastStepAt = performance.now();
+      lastRampAt = performance.now();
+
+      playSfx("start");
+    }
+
+    btnStart.addEventListener("click", () => startGame());
+    btnRestart.addEventListener("click", () => { resetGame(); startGame(); });
+    panelStart.addEventListener("click", () => startGame());
+    panelRestart.addEventListener("click", () => { resetGame(); startGame(); });
+
+    // -----------------------------
+    // Game loop (tick-based motion)
+    // -----------------------------
+    function stepMove() {
+      // apply pending direction
+      if (pendingDir && pendingDir !== dirKey) {
+        dirKey = pendingDir;
+        player.rotation.y = DIRS[dirKey].yaw;
+        commitTurn(dirKey);
+      }
+      pendingDir = null;
+
+      const d = DIRS[dirKey];
+      const nx = gx + d.dx;
+      const nz = gz + d.dz;
+
+      // wall collision
+      if (!inBounds(nx,nz)) {
+        die("You clipped the arena wall.");
+        return;
+      }
+
+      // self collision check (ignore a couple most-recent cells)
+      const k = keyOf(nx,nz);
+      if (occupied.has(k)) {
+        // If it's within last few cells, ignore; else collide
+        const recent = visitedCells.slice(-SELF_IGNORE_CELLS).some(c => c.x===nx && c.z===nz);
+        if (!recent) {
+          die("You ran into your own light trail.");
+          return;
+        }
+      }
+
+      // move
+      gx = nx; gz = nz;
+      lastCell = { x: gx, z: gz };
+
+      player.position.set(gx*CELL, 0, gz*CELL);
+
+      // mark occupied
+      occupied.add(k);
+      visitedCells.push({x:gx,z:gz});
+
+      // score
+      score += 1;
+      updateHud();
+    }
+
+    function updateCamera(dt) {
+      // trailing camera with gentle smoothing
+      const target = new THREE.Vector3(player.position.x, 0.8, player.position.z);
+
+      const back = new THREE.Vector3(0,0,1).applyAxisAngle(new THREE.Vector3(0,1,0), player.rotation.y);
+      const camPos = target.clone()
+        .add(back.multiplyScalar(9.5))
+        .add(new THREE.Vector3(0, 7.5, 0));
+
+      camera.position.lerp(camPos, 1 - Math.pow(0.001, dt));
+      camera.lookAt(target);
+    }
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+
+      const dt = Math.min(0.05, (now - (animate._last||now)) / 1000);
+      animate._last = now;
+
+      // wheel spin + glow pulse
+      const spin = running ? 0.18 : 0.05;
+      leftWheel.rotation.z  += spin;
+      rightWheel.rotation.z += spin;
+      core.scale.setScalar(1 + Math.sin(now*0.01)*0.05);
+
+      if (running && !gameOver) {
+        // speed ramp over time
+        if (now - lastRampAt > SPEED_RAMP_EVERY) {
+          stepMs *= SPEED_RAMP_FACTOR;
+          lastRampAt = now;
+          updateHud();
+        }
+
+        // tick movement
+        if (now - lastStepAt >= stepMs) {
+          lastStepAt = now;
+          stepMove();
+        }
+      }
+
+      updateCamera(dt);
+      renderer.render(scene, camera);
+    }
+
+    // resize
+    window.addEventListener("resize", () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // boot
+    resetGame();
+    requestAnimationFrame(animate);
+
+  </script>
+</body>
+</html>
